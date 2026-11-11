@@ -24,9 +24,9 @@ To go back to stock: `sudo dnf copr remove karanshukla/kwin-damage-copr && sudo 
 
 1. `stable-version.sh` asks Fedora's `fedora` + `updates` repos which kwin they serve now.
 2. If COPR has no build of that version with this repo's `TAG` yet, `make-srpm.sh` downloads
-   Fedora's source RPM, verifies its signature against the Fedora release key, checks the patch
-   applies, adds it to the spec as `Patch900`, appends `.fbdmgN` to the release, and builds the
-   SRPM.
+   Fedora's source RPM, verifies its signature against the Fedora release key, adds the patch to
+   the spec as `Patch900`, appends `.fbdmgN` to the release, runs the spec's real `%prep` (so the
+   patch must apply with no fuzz on top of Fedora's own patches), and builds the SRPM.
 3. `copr-cli` submits it to COPR and waits for the build.
 
 A run fails, and GitHub emails, if the signature does not verify, the patch stops applying, or
@@ -42,6 +42,14 @@ To build the SRPM locally (on Fedora, or in `registry.fedoraproject.org/fedora:4
 ```
 ./make-srpm.sh "$(./stable-version.sh)" out
 ```
+
+## When the patch stops applying
+
+The COPR run fails with exit code 3, and Fedora's stock kwin installs in the meantime. The daily
+watch routine then ports the patch: it rebases it in KWin's git from the last version that built
+onto the new one, checks it applies on top of Fedora's patches, and opens a PR that changes only
+the `.patch`. `compile.yml` builds the whole package on that PR. Review it and merge, and
+`copr.yml` builds the new version on the push to main.
 
 ## Maintenance
 

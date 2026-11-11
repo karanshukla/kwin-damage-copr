@@ -22,7 +22,6 @@ KEY=/usr/share/pki/rpm-gpg/RPM-GPG-KEY-fedora-$FEDORA-primary
 
 [[ $VR =~ ^[0-9][0-9.]*-[0-9][^/[:space:]]*$ ]] || { echo "bad VERSION-RELEASE: '$VR'" >&2; exit 1; }
 [[ $TAG =~ ^fbdmg[0-9]+$ ]] || { echo "bad TAG: '$TAG'" >&2; exit 1; }
-VER=${VR%%-*}
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
 

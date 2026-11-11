@@ -59,8 +59,11 @@ jobs:
           echo "vr=$VR" >> "$GITHUB_OUTPUT"
           builds=$(curl -fsS "https://copr.fedorainfracloud.org/api_3/build/list?ownername=$OWNER&projectname=$PROJECT&packagename=kwin&limit=50" \
             || echo '{"items":[]}')
-          STATE=$(jq -r --arg v "$WANT" \
-            '[.items[] | select((.source_package.version // "" | sub("^[0-9]+:"; "")) == $v)] | first | .state // "none"' <<<"$builds")
+          # COPR records the SRPM version without the dist tag (6.8.2-3.fbdmg1 for
+          # 6.8.2-3.fc45.fbdmg1), and with any epoch, so compare both sides without either.
+          STATE=$(jq -r --arg v "$WANT" '
+            def norm: sub("^[0-9]+:"; "") | gsub("\\.fc[0-9]+"; "");
+            [.items[] | select((.source_package.version // "" | norm) == ($v | norm))] | first | .state // "none"' <<<"$builds")
           echo "newest COPR build of kwin-$WANT: $STATE"
           case "$STATE" in
             succeeded|running|pending|starting|importing|waiting|forked) build=no ;;

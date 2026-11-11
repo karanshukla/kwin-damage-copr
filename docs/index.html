@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>KWin Damage Clips</title>
 <meta name="description" content="How panel self refresh and selective update work on eDP laptops, what FB_DAMAGE_CLIPS tells the kernel, and why KWin needs to send it to save display power.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 16 16%27%3E%3Crect x=%271%27 y=%272%27 width=%2714%27 height=%2710%27 rx=%271.5%27 fill=%27%232f6f8f%27/%3E%3Crect x=%274%27 y=%275%27 width=%276%27 height=%273%27 fill=%27%23c8553d%27/%3E%3C/svg%3E">
 <style>
 :root {
   --bg: #fbfaf7;
@@ -84,6 +85,7 @@ figure {
   padding: 1rem;
 }
 figure svg { width: 100%; height: auto; display: block; }
+.scroll { overflow-x: auto; }
 figcaption { color: var(--muted); font-size: .9rem; margin-top: .6rem; }
 table { width: 100%; border-collapse: collapse; font-size: .95rem; }
 th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
@@ -110,6 +112,7 @@ svg .line { stroke: var(--border); stroke-width: 1.5; }
   body { font-size: 16px; }
   h1 { font-size: 1.6rem; }
   main { padding-top: 2rem; }
+  figure .scroll svg { min-width: 560px; }
 }
 </style>
 </head>
@@ -131,7 +134,7 @@ svg .line { stroke: var(--border); stroke-width: 1.5; }
 <p><strong>PSR2</strong> and its successor <strong>Panel Replay</strong> add <em>selective update</em>. The panel stays in self refresh, and the GPU sends only the region that changed. On Intel GPUs the matching feature on the source side is <em>selective fetch</em>: the display engine reads only those lines from memory, not the whole frame.</p>
 
 <figure>
-<svg viewBox="0 0 640 210" role="img" aria-labelledby="t1">
+<div class="scroll"><svg viewBox="0 0 640 210" role="img" aria-labelledby="t1">
   <title id="t1">Timeline comparing full refresh, PSR1 and selective update over twelve frames</title>
   <text class="t" x="0" y="32">Full refresh</text>
   <text class="t" x="0" y="92">PSR1</text>
@@ -181,7 +184,7 @@ svg .line { stroke: var(--border); stroke-width: 1.5; }
   <rect class="full" x="140" y="186" width="12" height="12" rx="2"/><text class="m" x="158" y="197">whole frame sent</text>
   <rect class="su" x="290" y="189" width="12" height="6" rx="2"/><text class="m" x="308" y="197">only changed lines sent</text>
   <rect class="idle" x="470" y="186" width="12" height="12" rx="2"/><text class="m" x="488" y="197">panel refreshes itself</text>
-</svg>
+</svg></div>
 <figcaption>A cursor blinking every third frame. PSR1 has to resend the whole frame for each blink. Selective update sends only the lines around the cursor and stays in self refresh.</figcaption>
 </figure>
 
@@ -191,7 +194,7 @@ svg .line { stroke: var(--border); stroke-width: 1.5; }
 <p>On Linux a compositor such as KWin hands each frame to the kernel through an <em>atomic commit</em>, one per refresh, listing the buffers for each plane (the main picture, the cursor, any overlays). Each plane has an optional property, <code>FB_DAMAGE_CLIPS</code>, which is a list of rectangles: the parts of the buffer that changed since the last commit. "Damage" is the usual graphics word for "needs redrawing".</p>
 
 <figure>
-<svg viewBox="0 0 640 260" role="img" aria-labelledby="t2">
+<div class="scroll"><svg viewBox="0 0 640 260" role="img" aria-labelledby="t2">
   <title id="t2">A screen where only a small video window changed, compared with the kernel treating the whole screen as changed</title>
   <text class="t" x="10" y="20">With damage clips</text>
   <rect class="frame" x="10" y="32" width="290" height="180" rx="6"/>
@@ -202,7 +205,7 @@ svg .line { stroke: var(--border); stroke-width: 1.5; }
   <rect class="dmg" x="340" y="32" width="290" height="180" rx="6"/>
   <rect class="win" x="370" y="60" width="150" height="110" rx="4"/>
   <text class="m" x="340" y="236">No clips means the whole plane counts as changed</text>
-</svg>
+</svg></div>
 <figcaption>The same frame: a video playing in a window. Shaded red is what the kernel treats as damaged.</figcaption>
 </figure>
 

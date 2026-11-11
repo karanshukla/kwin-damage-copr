@@ -8,7 +8,7 @@
 # registry.fedoraproject.org/fedora:NN container). Needs dnf, rpm-build, cpio, patch, xz.
 #
 # Exit codes: 2 Fedora's signature on the source RPM did not verify, 3 the patch no longer
-# applies, 4 the spec changed shape and the edit below needs updating.
+# applies on top of Fedora's own patches, 4 the spec changed shape and the edit below needs updating.
 
 set -euo pipefail
 
@@ -41,15 +41,9 @@ if ! rpmkeys --dbpath "$KEYRING" --define '_keyring rpmdb' --define '_pkgverify_
     exit 2
 fi
 
-# 3. Unpack, and check the patch applies to that tree.
-mkdir "$WORK/in" "$WORK/src"
+# 3. Unpack.
+mkdir "$WORK/in"
 ( cd "$WORK/in" && rpm2cpio "$SRPM" | cpio -idm --quiet )
-tar -xJf "$WORK/in/kwin-$VER.tar.xz" -C "$WORK/src" --strip-components=1
-if ! patch -p1 --dry-run -d "$WORK/src" < "$PATCH" >/dev/null; then
-    echo "::error::the patch does not apply to kwin $VR" >&2
-    patch -p1 --dry-run -d "$WORK/src" < "$PATCH" | tail -20 >&2 || true
-    exit 3
-fi
 
 # 4. Spec: add the patch (a high number, so it cannot clash with Fedora's own) and a release tag
 #    after %{?dist}, so the result sorts above Fedora's build of the same version.
@@ -73,7 +67,18 @@ then
 fi
 grep -nE '^(Release|Patch900):' "$WORK/in/kwin.spec"
 
-# 5. The source RPM itself.
+# 5. Does it apply? Run the spec's real %prep, so Fedora's own patches go in first and ours
+#    goes on top of them, exactly as in COPR. A dry run against the pristine tarball would miss a
+#    Fedora patch that touches the same files.
+if ! rpmbuild -bp --nodeps "$WORK/in/kwin.spec" --define "_topdir $WORK/rpmbuild" \
+        --define "_sourcedir $WORK/in" --define "_builddir $WORK/build" > "$WORK/prep.log" 2>&1; then
+    echo "::error::the patch does not apply to kwin $VR (on top of Fedora's own patches)" >&2
+    tail -25 "$WORK/prep.log" >&2
+    exit 3
+fi
+grep -q "$(basename "$PATCH")" "$WORK/prep.log" || { echo "::error::%prep did not apply $(basename "$PATCH")" >&2; tail -25 "$WORK/prep.log" >&2; exit 3; }
+
+# 6. The source RPM itself.
 mkdir -p "$OUT"
 rpmbuild -bs "$WORK/in/kwin.spec" --define "_topdir $WORK/rpmbuild" \
     --define "_sourcedir $WORK/in" --define "_srcrpmdir $OUT"

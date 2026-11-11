@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The real path short of COPR: verify Fedora's signed source RPM, apply the patch, write the
+  # spec, build the SRPM. Catches a patch that no longer applies before a PR merges.
+  srpm:
+    runs-on: ubuntu-latest
+    container: registry.fedoraproject.org/fedora:45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: dnf -y -q install --setopt=install_weak_deps=False rpm-build cpio patch xz python3
+      - name: Build the source RPM
+        run: |
+          set -euo pipefail
+          srpm=$(./make-srpm.sh "$(./stable-version.sh)" out | tail -1)
+          rpm -qp --qf '%{NVR}\n' "$srpm"
+          rpm -qpl "$srpm" | grep -qx '0001-backends-drm-send-FB_DAMAGE_CLIPS-for-composited-frames.patch'
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: shellcheck ./*.sh .github/tests/*.sh
+
+  # actionlint also runs shellcheck over every `run:` block.
+  workflows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint
+        env:
+          VERSION: 1.7.12
+          SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+        run: |
+          curl -fsSLo actionlint.tar.gz "https://github.com/rhysd/actionlint/releases/download/v$VERSION/actionlint_${VERSION}_linux_amd64.tar.gz"
+          echo "$SHA256  actionlint.tar.gz" | sha256sum -c -
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf actionlint.tar.gz -C "$RUNNER_TEMP/bin" actionlint
+          rm actionlint.tar.gz
+      - run: '"$RUNNER_TEMP/bin/actionlint"'
+
+  # guard.yml runs from main under pull_request_target, so a change to it is only exercised
+  # once merged. This runs the PR's copy against a stub `gh`.
+  guard-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: bash .github/tests/guard.sh

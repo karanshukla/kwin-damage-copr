@@ -1,26 +1,38 @@
-name: Rebuild kwin in COPR
+name: COPR
 
-# Every 6 hours: if Fedora's stable kwin has no matching patched build in COPR yet, build one.
-# A run fails (and GitHub emails) when the patch stops applying or the COPR build fails.
+# Every 6 hours: if Fedora's stable kwin has no patched build in COPR yet, build one.
+# A run fails, and GitHub emails, when the source RPM's signature does not verify, the patch
+# stops applying, or the COPR build fails.
 
 on:
   schedule:
     - cron: "17 */6 * * *"
   workflow_dispatch:
+    inputs:
+      retry:
+        description: "Build again even if the last COPR build of this version failed"
+        type: boolean
+        default: false
   push:
     branches: [main]
-    paths: ["0001-*.patch", "TAG", "make-srpm.sh", ".github/workflows/copr.yml"]
+    paths: ["0001-*.patch", "TAG", "make-srpm.sh", "stable-version.sh", ".github/workflows/copr.yml"]
+
+permissions:
+  contents: read
 
 concurrency:
-  group: copr-${{ github.ref }}
+  group: copr
   cancel-in-progress: false
 
 env:
-  PROJECT: kwin-damage
+  PROJECT: kwin-damage-copr
+  OWNER: karanshukla
 
 jobs:
-  rebuild:
+  build:
     runs-on: ubuntu-latest
+    # COPR_CONFIG lives in this environment, which only main can deploy to.
+    environment: copr
     timeout-minutes: 300
     strategy:
       fail-fast: false
@@ -28,47 +40,54 @@ jobs:
         fedora: ["45"]
     container: registry.fedoraproject.org/fedora:${{ matrix.fedora }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Tools
-        run: dnf -y install --setopt=install_weak_deps=False copr-cli rpm-build cpio patch xz curl jq python3
-
-      - name: COPR config
-        env:
-          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
-        run: |
-          test -n "$COPR_CONFIG" || { echo "::error::COPR_CONFIG secret is not set"; exit 1; }
-          mkdir -p ~/.config && printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
-          echo "OWNER=$(sed -n 's/^username *= *//p' ~/.config/copr)" >> "$GITHUB_ENV"
+        run: dnf -y -q install --setopt=install_weak_deps=False copr-cli rpm-build cpio patch xz jq python3
 
       - name: What needs building
         id: want
+        env:
+          RETRY: ${{ inputs.retry }}
         run: |
-          NVR=$(python3 -I latest-stable.py ${{ matrix.fedora }})
-          WANT="${NVR#kwin-}.$(cat TAG)"
-          echo "Fedora stable: $NVR, want COPR kwin $WANT"
-          echo "want=$WANT" >> "$GITHUB_OUTPUT"
-          echo "nvr=$NVR" >> "$GITHUB_OUTPUT"
-          API=https://copr.fedorainfracloud.org/api_3
-          if ! curl -fsS "$API/project?ownername=$OWNER&projectname=$PROJECT" >/dev/null; then
-            copr-cli create "$PROJECT" --chroot "fedora-${{ matrix.fedora }}-x86_64" \
-              --description "Fedora's kwin with FB_DAMAGE_CLIPS sent for composited frames, so the kernel can do selective update instead of full-frame refresh." \
-              --instructions "dnf copr enable $OWNER/$PROJECT, then dnf upgrade kwin kwin-common kwin-libs and log out and back in."
-          fi
-          STATE=$(curl -fsS "$API/build/list?ownername=$OWNER&projectname=$PROJECT&packagename=kwin&limit=50" 2>/dev/null \
-            | jq -r --arg v "$WANT" '[.items[] | select((.source_package.version // "" | sub("^[0-9]+:"; "")) == $v)] | first | .state // "none"')
-          echo "existing build of $WANT: $STATE"
+          set -euo pipefail
+          VR=$(./stable-version.sh)
+          WANT="$VR.$(cat TAG)"
+          echo "Fedora stable kwin: $VR, want kwin-$WANT in $OWNER/$PROJECT"
+          echo "vr=$VR" >> "$GITHUB_OUTPUT"
+          builds=$(curl -fsS "https://copr.fedorainfracloud.org/api_3/build/list?ownername=$OWNER&projectname=$PROJECT&packagename=kwin&limit=50" \
+            || echo '{"items":[]}')
+          STATE=$(jq -r --arg v "$WANT" \
+            '[.items[] | select((.source_package.version // "" | sub("^[0-9]+:"; "")) == $v)] | first | .state // "none"' <<<"$builds")
+          echo "newest COPR build of kwin-$WANT: $STATE"
           case "$STATE" in
-            succeeded|running|pending|starting|importing|waiting) echo "build=no" >> "$GITHUB_OUTPUT" ;;
-            failed) echo "::error::the last COPR build of $WANT failed; fix it, then bump TAG or re-run by hand"; \
-                    [ "${{ github.event_name }}" = workflow_dispatch ] && echo "build=yes" >> "$GITHUB_OUTPUT" || exit 1 ;;
-            *) echo "build=yes" >> "$GITHUB_OUTPUT" ;;
+            succeeded|running|pending|starting|importing|waiting|forked) build=no ;;
+            failed|canceled)
+              if [ "$RETRY" = true ]; then build=yes; else
+                echo "::error::the last COPR build of kwin-$WANT $STATE; fix it and bump TAG, or run this workflow with retry"
+                exit 1
+              fi ;;
+            *) build=yes ;;
           esac
+          echo "build=$build" >> "$GITHUB_OUTPUT"
 
       - name: Source RPM
         if: steps.want.outputs.build == 'yes'
-        run: ./make-srpm.sh "${{ steps.want.outputs.nvr }}" out
+        env:
+          VR: ${{ steps.want.outputs.vr }}
+        run: ./make-srpm.sh "$VR" out
 
       - name: COPR build
         if: steps.want.outputs.build == 'yes'
-        run: copr-cli build "$OWNER/$PROJECT" --chroot "fedora-${{ matrix.fedora }}-x86_64" out/*.src.rpm
+        env:
+          COPR_CONFIG: ${{ secrets.COPR_CONFIG }}
+          CHROOT: fedora-${{ matrix.fedora }}-x86_64
+        run: |
+          set -euo pipefail
+          test -n "$COPR_CONFIG" || { echo "::error::COPR_CONFIG is not set in the copr environment"; exit 1; }
+          umask 077
+          mkdir -p ~/.config
+          printf '%s\n' "$COPR_CONFIG" > ~/.config/copr
+          copr-cli build "$OWNER/$PROJECT" --chroot "$CHROOT" out/*.src.rpm

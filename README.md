@@ -8,6 +8,8 @@ every time. The patch fills the property from the damage KWin actually rendered,
 to 0 whenever the damage isn't known (direct scanout, cursor and software layers, scaled or
 transformed planes). The same change is proposed upstream as KWin MR !3548.
 
+How panel self refresh and damage clips work, and why this saves power: <https://karanshukla.github.io/kwin-damage-copr/>
+
 ## Install
 
 ```

@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KWin Damage Clips</title>
+<meta name="description" content="How panel self refresh and selective update work on eDP laptops, what FB_DAMAGE_CLIPS tells the kernel, and why KWin needs to send it to save display power.">
+<style>
+:root {
+  --bg: #fbfaf7;
+  --surface: #ffffff;
+  --text: #1d1c1a;
+  --muted: #5f5b54;
+  --border: #e3dfd6;
+  --accent: #2f6f8f;
+  --accent-soft: #dcebf2;
+  --damage: #c8553d;
+  --damage-soft: #f6ddd6;
+  --idle: #d9d5cc;
+  --code-bg: #f1eee8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #161615;
+    --surface: #1f1e1c;
+    --text: #ebe8e2;
+    --muted: #a8a299;
+    --border: #34322e;
+    --accent: #7fb6d1;
+    --accent-soft: #1f3540;
+    --damage: #e8806a;
+    --damage-soft: #44261f;
+    --idle: #3a3833;
+    --code-bg: #262522;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #161615;
+  --surface: #1f1e1c;
+  --text: #ebe8e2;
+  --muted: #a8a299;
+  --border: #34322e;
+  --accent: #7fb6d1;
+  --accent-soft: #1f3540;
+  --damage: #e8806a;
+  --damage-soft: #44261f;
+  --idle: #3a3833;
+  --code-bg: #262522;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 17px/1.6 system-ui, -apple-system, "Segoe UI", Roboto, "Noto Sans", sans-serif;
+}
+main { max-width: 46rem; margin: 0 auto; padding: 3rem 16px 4rem; }
+h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.01em; }
+h2 { font-size: 1.35rem; margin: 2.75rem 0 .75rem; }
+p, li { color: var(--text); }
+.lede { color: var(--muted); font-size: 1.1rem; margin-top: 0; }
+a { color: var(--accent); }
+code {
+  font: .88em/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  background: var(--code-bg);
+  padding: .1em .35em;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+pre {
+  background: var(--code-bg);
+  padding: .9rem 1rem;
+  border-radius: 8px;
+  overflow-x: auto;
+  font-size: .85rem;
+}
+pre code { background: none; padding: 0; }
+figure {
+  margin: 1.5rem 0;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+}
+figure svg { width: 100%; height: auto; display: block; }
+figcaption { color: var(--muted); font-size: .9rem; margin-top: .6rem; }
+table { width: 100%; border-collapse: collapse; font-size: .95rem; }
+th, td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.table-wrap { overflow-x: auto; }
+.note {
+  border-left: 3px solid var(--accent);
+  background: var(--accent-soft);
+  padding: .75rem 1rem;
+  border-radius: 0 8px 8px 0;
+}
+footer { color: var(--muted); font-size: .9rem; margin-top: 3rem; border-top: 1px solid var(--border); padding-top: 1rem; }
+svg .t { fill: var(--text); font: 13px system-ui, sans-serif; }
+svg .m { fill: var(--muted); font: 12px system-ui, sans-serif; }
+svg .frame { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+svg .full { fill: var(--accent); }
+svg .su { fill: var(--damage); }
+svg .idle { fill: var(--idle); }
+svg .dmg { fill: var(--damage-soft); stroke: var(--damage); stroke-width: 2; }
+svg .win { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+svg .line { stroke: var(--border); stroke-width: 1.5; }
+@media (max-width: 520px) {
+  body { font-size: 16px; }
+  h1 { font-size: 1.6rem; }
+  main { padding-top: 2rem; }
+}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Why KWin should tell the kernel what changed</h1>
+<p class="lede">Panel self refresh, selective update, and the <code>FB_DAMAGE_CLIPS</code> property: how a laptop's built-in screen saves power when most of it isn't changing, and why KWin currently stops it from saving as much as it could.</p>
+
+<h2>The screen is mostly still</h2>
+<p>A laptop's internal panel is connected over eDP (embedded DisplayPort). In the simplest setup the GPU's display engine reads the whole frame from memory and sends it down the link 60 or 120 times a second, even if nothing on screen has moved. That costs power in three places: memory reads, the display engine itself, and the link.</p>
+<p>Most of the time very little changes. A blinking cursor, a clock, a scrolling chat. The rest of the screen is the same picture as the frame before.</p>
+
+<h2>Panel self refresh</h2>
+<p>Panels that support <strong>PSR</strong> (Panel Self Refresh) have a small frame buffer of their own. When the image stops changing, the GPU sends one last frame, the panel keeps refreshing itself from its own copy, and the GPU can stop sending. The link powers down, memory goes quiet, and the display engine can drop into its deeper power states.</p>
+<p>The catch with the first version, PSR1, is that any change at all ends it. One cursor blink and the GPU has to wake up and send the whole frame again.</p>
+
+<h2>Selective update: send only the part that changed</h2>
+<p><strong>PSR2</strong> and its successor <strong>Panel Replay</strong> add <em>selective update</em>. The panel stays in self refresh, and the GPU sends only the region that changed. On Intel GPUs the matching feature on the source side is <em>selective fetch</em>: the display engine reads only those lines from memory, not the whole frame.</p>
+
+<figure>
+<svg viewBox="0 0 640 210" role="img" aria-labelledby="t1">
+  <title id="t1">Timeline comparing full refresh, PSR1 and selective update over twelve frames</title>
+  <text class="t" x="0" y="32">Full refresh</text>
+  <text class="t" x="0" y="92">PSR1</text>
+  <text class="t" x="0" y="152">Selective update</text>
+  <g id="row1">
+    <rect class="full" x="140" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="180" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="220" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="260" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="300" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="340" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="380" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="420" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="460" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="500" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="540" y="14" width="34" height="28" rx="3"/>
+    <rect class="full" x="580" y="14" width="34" height="28" rx="3"/>
+  </g>
+  <g>
+    <rect class="full" x="140" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="180" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="220" y="74" width="34" height="28" rx="3"/>
+    <rect class="full" x="260" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="300" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="340" y="74" width="34" height="28" rx="3"/>
+    <rect class="full" x="380" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="420" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="460" y="74" width="34" height="28" rx="3"/>
+    <rect class="full" x="500" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="540" y="74" width="34" height="28" rx="3"/>
+    <rect class="idle" x="580" y="74" width="34" height="28" rx="3"/>
+  </g>
+  <g>
+    <rect class="full" x="140" y="134" width="34" height="28" rx="3"/>
+    <rect class="idle" x="180" y="134" width="34" height="28" rx="3"/>
+    <rect class="idle" x="220" y="134" width="34" height="28" rx="3"/>
+    <rect class="su" x="260" y="145" width="34" height="6" rx="2"/>
+    <rect class="idle" x="300" y="134" width="34" height="28" rx="3"/>
+    <rect class="idle" x="340" y="134" width="34" height="28" rx="3"/>
+    <rect class="su" x="380" y="145" width="34" height="6" rx="2"/>
+    <rect class="idle" x="420" y="134" width="34" height="28" rx="3"/>
+    <rect class="idle" x="460" y="134" width="34" height="28" rx="3"/>
+    <rect class="su" x="500" y="145" width="34" height="6" rx="2"/>
+    <rect class="idle" x="540" y="134" width="34" height="28" rx="3"/>
+    <rect class="idle" x="580" y="134" width="34" height="28" rx="3"/>
+  </g>
+  <rect class="full" x="140" y="186" width="12" height="12" rx="2"/><text class="m" x="158" y="197">whole frame sent</text>
+  <rect class="su" x="290" y="189" width="12" height="6" rx="2"/><text class="m" x="308" y="197">only changed lines sent</text>
+  <rect class="idle" x="470" y="186" width="12" height="12" rx="2"/><text class="m" x="488" y="197">panel refreshes itself</text>
+</svg>
+<figcaption>A cursor blinking every third frame. PSR1 has to resend the whole frame for each blink. Selective update sends only the lines around the cursor and stays in self refresh.</figcaption>
+</figure>
+
+<p>To do that, the kernel has to know <em>which</em> part of the screen changed. It can't work that out itself: comparing frames would cost more than it saves. The compositor already knows, because it just drew the frame.</p>
+
+<h2>Damage clips: how the compositor says what changed</h2>
+<p>On Linux a compositor such as KWin hands each frame to the kernel through an <em>atomic commit</em>, one per refresh, listing the buffers for each plane (the main picture, the cursor, any overlays). Each plane has an optional property, <code>FB_DAMAGE_CLIPS</code>, which is a list of rectangles: the parts of the buffer that changed since the last commit. "Damage" is the usual graphics word for "needs redrawing".</p>
+
+<figure>
+<svg viewBox="0 0 640 260" role="img" aria-labelledby="t2">
+  <title id="t2">A screen where only a small video window changed, compared with the kernel treating the whole screen as changed</title>
+  <text class="t" x="10" y="20">With damage clips</text>
+  <rect class="frame" x="10" y="32" width="290" height="180" rx="6"/>
+  <rect class="win" x="40" y="60" width="150" height="110" rx="4"/>
+  <rect class="dmg" x="60" y="85" width="110" height="65" rx="2"/>
+  <text class="m" x="10" y="236">Kernel fetches and sends one rectangle</text>
+  <text class="t" x="340" y="20">Without (KWin today)</text>
+  <rect class="dmg" x="340" y="32" width="290" height="180" rx="6"/>
+  <rect class="win" x="370" y="60" width="150" height="110" rx="4"/>
+  <text class="m" x="340" y="236">No clips means the whole plane counts as changed</text>
+</svg>
+<figcaption>The same frame: a video playing in a window. Shaded red is what the kernel treats as damaged.</figcaption>
+</figure>
+
+<p>The rule in the kernel's damage helper (<code>drm_atomic_helper_damage_iter_init()</code>) is simple: a plane that is in the commit with <em>no</em> damage clips is treated as fully damaged. That's the safe default, because the kernel can't assume anything stayed the same.</p>
+
+<h2>What KWin does today</h2>
+<p>KWin sets <code>FB_DAMAGE_CLIPS</code> to <code>0</code>, meaning "no clips", on every plane in every commit. That's deliberate: a previous program holding the display could have left a stale damage list behind, and the kernel doesn't reset it, so clearing it is the safe thing to do. But it means that every commit that includes the main plane is full height, however little changed.</p>
+<p>So on a PSR2 or Panel Replay panel, KWin gets selective update in name only. The panel still self-refreshes on a completely static screen, but as soon as anything moves, such as a blinking cursor, a ticking clock, or a progress bar, the whole frame is fetched from memory and sent down the link again.</p>
+<p>The upstream change that would fix this is <a href="https://invent.kde.org/plasma/kwin/-/merge_requests/3548">KWin merge request !3548</a>, "backends/drm: add support for FB_DAMAGE_CLIPS", which names PSR2 power as its motivation. It's open and targeted at Plasma 6.9.</p>
+
+<h2>What the patch does</h2>
+<p>The patch in this repo is a smaller port of the same idea, written against the KWin that Fedora ships:</p>
+<ul>
+  <li>After KWin composites a frame, it records the region it actually redrew and sends it as <code>FB_DAMAGE_CLIPS</code> on the next commit.</li>
+  <li>Damage from a frame that was drawn but never sent is kept and added to the next one, and when KWin merges two pending commits it merges their damage too. Otherwise the panel could miss an update.</li>
+  <li>Anywhere it can't be sure, it keeps the old behaviour and sends <code>0</code>: direct scanout (a fullscreen game or video handed straight to the display), the first frame after it, cursor and software layers, and scaled, rotated or offset planes.</li>
+</ul>
+<p>It touches seven files under <code>src/backends/drm/</code>, about 130 added lines.</p>
+
+<h2>What it changes in practice</h2>
+<p>Measured on an Intel Panther Lake–family laptop (Xe3 display, 2560×1600 eDP panel running Panel Replay with selective update) with this patch on Fedora's KWin 6.8. "Partial" is the share of commits the kernel sent as a selective update instead of a full frame; "area" is the average share of the screen each update covered.</p>
+
+<div class="table-wrap">
+<table>
+  <thead><tr><th>What was on screen</th><th>Partial</th><th>Area</th></tr></thead>
+  <tbody>
+    <tr><td>Idle desktop</td><td class="num">100%</td><td class="num">10%</td></tr>
+    <tr><td>Static window, mouse moving</td><td class="num">99%</td><td class="num">4%</td></tr>
+    <tr><td>Small video window</td><td class="num">100%</td><td class="num">24%</td></tr>
+    <tr><td>Half-screen video window</td><td class="num">100%</td><td class="num">62%</td></tr>
+    <tr><td>Fullscreen video (direct scanout)</td><td class="num">0%</td><td class="num">100%</td></tr>
+  </tbody>
+</table>
+</div>
+
+<p>With stock KWin, the same machine sent about 95 to 100% of updates at full height. The fullscreen row is full height with or without the patch, because direct scanout bypasses compositing and the patch sends no clips there. No kernel errors or uncovered damage were seen in any run.</p>
+
+<p class="note">The battery saving itself hasn't been measured against stock KWin on the same setup yet, so this page doesn't put a number on it. What's measured is that the display hardware now fetches and sends a fraction of the screen instead of all of it. That's the work PSR2 and Panel Replay exist to avoid.</p>
+
+<h2>Who this helps</h2>
+<p>Laptops whose built-in panel supports PSR2 or Panel Replay with selective update, on a driver that reads <code>FB_DAMAGE_CLIPS</code>. The patch has only been tested on Intel's <code>xe</code> driver. On anything else it should change nothing: drivers that ignore the property keep doing full updates, as they do today.</p>
+
+<h2>Installing it on Fedora</h2>
+<p>The <a href="https://github.com/karanshukla/kwin-damage-copr">repository</a> rebuilds Fedora's own kwin with this one patch, in <a href="https://copr.fedorainfracloud.org/coprs/karanshukla/kwin-damage-copr/">COPR</a>, whenever Fedora's stable kwin changes.</p>
+<pre><code>sudo dnf copr enable karanshukla/kwin-damage-copr
+sudo dnf upgrade kwin kwin-common kwin-libs</code></pre>
+<p>Then log out and back in. To check whether your hardware is using selective update, look at <code>/sys/kernel/debug/dri/0/i915_edp_psr_status</code> as root. It should say <code>PSR2</code> or <code>Panel Replay Selective Update</code>, with selective fetch enabled. To go back to stock: <code>sudo dnf copr remove karanshukla/kwin-damage-copr &amp;&amp; sudo dnf distro-sync kwin kwin-common kwin-libs</code>.</p>
+
+<footer>
+  This is a stopgap until KWin ships damage clips itself. The patch and build scripts are GPL-2.0-or-later, like KWin. Source, build process and security notes: <a href="https://github.com/karanshukla/kwin-damage-copr">github.com/karanshukla/kwin-damage-copr</a>.
+</footer>
+
+</main>
+</body>
+</html>
